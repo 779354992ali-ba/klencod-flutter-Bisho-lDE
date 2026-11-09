@@ -1,6 +1,5 @@
 
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -27,6 +26,11 @@ import 'package:highlight/languages/php.dart' as php_lang;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:saf/saf.dart';
+
+import 'core/services/saf_file_service.dart';
+import 'flutter_preview_screen.dart';
+import 'html_preview_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -61,7 +65,10 @@ class EditorTab {
 
   String fileName;
   String language;
-  String? filePath;
+
+  String? fileUri;
+  String? parentUri;
+
   bool isSaved;
 
   EditorTab({
@@ -69,8 +76,26 @@ class EditorTab {
     required this.controller,
     required this.fileName,
     required this.language,
-    this.filePath,
+    this.fileUri,
+    this.parentUri,
     this.isSaved = true,
+  });
+}
+
+/// يمثل عنصرًا داخل شجرة SAF.
+class _SafTreeEntry {
+  final String uri;
+  final String name;
+  final String relativePath;
+  final String? parentUri;
+  final bool isDir;
+
+  const _SafTreeEntry({
+    required this.uri,
+    required this.name,
+    required this.relativePath,
+    required this.parentUri,
+    required this.isDir,
   });
 }
 
@@ -82,6 +107,15 @@ class EditorScreen extends StatefulWidget {
 }
 
 class _EditorScreenState extends State<EditorScreen> {
+  static const String _savedDirectoryUriKey =
+      'bisho_selected_directory_uri';
+
+  static const String _savedDirectoryNameKey =
+      'bisho_selected_directory_name';
+
+  final Saf saf = Saf();
+  final SafFileService safFiles = SafFileService();
+
   final Map<String, dynamic> languages = {
     'Dart': dart_lang.dart,
     'Python': python_lang.python,
@@ -128,15 +162,36 @@ class _EditorScreenState extends State<EditorScreen> {
 
   int activeIndex = 0;
   int nextTabId = 1;
+  int _explorerRevision = 0;
 
   String status = 'جاهز';
-  String? projectPath;
+
+  String? projectUri;
   String projectName = 'لا يوجد مشروع';
+
+  // مجلد العمل المحدد لإنشاء الملفات والمجلدات.
+  // إذا كانت قيمته null فسيكون جذر المشروع هو الوجهة.
+  String? selectedDirectoryUri;
+  String selectedDirectoryName = '';
 
   bool isRestoring = false;
   bool explorerVisible = true;
 
   EditorTab get activeTab => tabs[activeIndex];
+
+  // وجهة الإنشاء الحالية.
+  String? get creationDirectoryUri {
+    return selectedDirectoryUri ?? projectUri;
+  }
+
+  // اسم وجهة الإنشاء الحالية.
+  String get creationDirectoryName {
+    if (selectedDirectoryUri == null) {
+      return projectName;
+    }
+
+    return selectedDirectoryName;
+  }
 
   @override
   void initState() {
@@ -152,7 +207,8 @@ class _EditorScreenState extends State<EditorScreen> {
     String fileName = 'untitled.dart',
     String language = 'Dart',
     String? code,
-    String? filePath,
+    String? fileUri,
+    String? parentUri,
     bool isSaved = false,
   }) {
     final controller = CodeController(
@@ -166,7 +222,8 @@ class _EditorScreenState extends State<EditorScreen> {
       controller: controller,
       fileName: fileName,
       language: language,
-      filePath: filePath,
+      fileUri: fileUri,
+      parentUri: parentUri,
       isSaved: isSaved,
     );
 
@@ -182,43 +239,302 @@ class _EditorScreenState extends State<EditorScreen> {
     return tab;
   }
 
+  /// حفظ بيانات مجلد العمل المحدد.
+  Future<void> _saveSelectedDirectoryState() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    if (selectedDirectoryUri == null ||
+        selectedDirectoryUri!.isEmpty) {
+      await prefs.remove(_savedDirectoryUriKey);
+      await prefs.remove(_savedDirectoryNameKey);
+      return;
+    }
+
+    await prefs.setString(
+      _savedDirectoryUriKey,
+      selectedDirectoryUri!,
+    );
+
+    await prefs.setString(
+      _savedDirectoryNameKey,
+      selectedDirectoryName,
+    );
+  }
+
+  /// مسح بيانات مجلد العمل المحفوظة.
+  Future<void> _clearSavedDirectoryState() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    await prefs.remove(_savedDirectoryUriKey);
+    await prefs.remove(_savedDirectoryNameKey);
+  }
+
+  /// تحديد مجلد العمل وحفظه لاستعادته لاحقًا.
+  Future<void> selectCreationDirectory(
+    String directoryUri,
+    String directoryName,
+  ) async {
+    if (projectUri == null) return;
+
+    try {
+      final directory = await safFiles.getItem(directoryUri);
+
+      if (directory == null || !directory.isDir) {
+        showMessage('هذا المجلد غير متاح');
+        return;
+      }
+
+      // التأكد من أن المجلد داخل المشروع المفتوح.
+      final root = await safFiles.getItem(projectUri!);
+
+      if (root == null || !root.isDir) {
+        showMessage('تعذر الوصول إلى جذر المشروع');
+        return;
+      }
+
+      final tree = await collectSubtree(root);
+
+      final isInsideProject = tree.any(
+        (entry) =>
+            entry.uri == directoryUri &&
+            entry.isDir,
+      );
+
+      if (!isInsideProject) {
+        showMessage('المجلد ليس داخل المشروع المفتوح');
+        return;
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        selectedDirectoryUri = directory.uri;
+        selectedDirectoryName = directory.name.isNotEmpty
+            ? directory.name
+            : directoryName;
+        status = 'مجلد العمل: $selectedDirectoryName';
+      });
+
+      await _saveSelectedDirectoryState();
+
+      if (!mounted) return;
+
+      showMessage(
+        'تم حفظ "$selectedDirectoryName" كمجلد عمل',
+      );
+    } catch (e) {
+      showMessage('تعذر تحديد مجلد العمل: $e');
+    }
+  }
+
+  /// العودة إلى جذر المشروع ومسح الاختيار المحفوظ.
+  Future<void> resetCreationDirectory() async {
+    if (projectUri == null) return;
+
+    try {
+      if (!mounted) return;
+
+      setState(() {
+        selectedDirectoryUri = null;
+        selectedDirectoryName = '';
+        status = 'مجلد العمل: جذر المشروع';
+      });
+
+      await _clearSavedDirectoryState();
+
+      if (!mounted) return;
+
+      showMessage('تمت العودة إلى جذر المشروع');
+    } catch (e) {
+      showMessage('تعذر تغيير مجلد العمل: $e');
+    }
+  }
+
+  /// تحديث المستكشف مع الاحتفاظ بحالة المجلدات.
+  void refreshExplorer() {
+    if (!mounted) return;
+
+    setState(() {
+      _explorerRevision++;
+      status = 'تم تحديث المستكشف';
+    });
+  }
+
+  /// استعادة مجلد العمل بصورة مستقلة عن التبويبات.
+  Future<void> _restoreSelectedDirectory(
+    SharedPreferences prefs,
+  ) async {
+    selectedDirectoryUri = null;
+    selectedDirectoryName = '';
+
+    try {
+      if (projectUri == null || projectUri!.isEmpty) {
+        await _clearSavedDirectoryState();
+        return;
+      }
+
+      final savedUri = prefs.getString(_savedDirectoryUriKey);
+
+      if (savedUri == null || savedUri.isEmpty) {
+        return;
+      }
+
+      // التأكد من صلاحية مجلد المشروع.
+      final root = await safFiles.getItem(projectUri!);
+
+      if (root == null || !root.isDir) {
+        await _clearSavedDirectoryState();
+        return;
+      }
+
+      // التأكد أن مجلد العمل ما زال داخل المشروع.
+      final tree = await collectSubtree(root);
+
+      _SafTreeEntry? matchingDirectory;
+
+      for (final entry in tree) {
+        if (entry.uri == savedUri && entry.isDir) {
+          matchingDirectory = entry;
+          break;
+        }
+      }
+
+      if (matchingDirectory == null) {
+        await _clearSavedDirectoryState();
+        return;
+      }
+
+      selectedDirectoryUri = matchingDirectory.uri;
+      selectedDirectoryName = matchingDirectory.name;
+
+      // تحديث الاسم المحفوظ إذا تغير اسم المجلد.
+      await _saveSelectedDirectoryState();
+    } catch (_) {
+      // فشل الاستعادة لا يمنع استعادة التبويبات.
+      selectedDirectoryUri = null;
+      selectedDirectoryName = '';
+
+      try {
+        await _clearSavedDirectoryState();
+      } catch (_) {}
+    }
+  }
+
   Future<void> restoreTabs() async {
     isRestoring = true;
 
     try {
       final prefs = await SharedPreferences.getInstance();
+
       final savedTabs = prefs.getString('bisho_tabs');
       final savedIndex = prefs.getInt('bisho_active_index') ?? 0;
 
-      projectPath = prefs.getString('bisho_project_path');
-      projectName =
-          prefs.getString('bisho_project_name') ?? 'لا يوجد مشروع';
+      final savedProjectUri =
+          prefs.getString('bisho_project_uri');
 
+      final savedProjectName =
+          prefs.getString('bisho_project_name') ??
+              'لا يوجد مشروع';
+
+      projectUri = null;
+      projectName = 'لا يوجد مشروع';
+
+      selectedDirectoryUri = null;
+      selectedDirectoryName = '';
+
+      // استعادة المشروع والتحقق من صلاحيات SAF.
+      if (savedProjectUri != null &&
+          savedProjectUri.isNotEmpty) {
+        try {
+          final permissions =
+              await safFiles.getPersistedPermissions();
+
+          final matchingPermission = permissions.where(
+            (permission) =>
+                permission.uri == savedProjectUri &&
+                permission.read &&
+                permission.write,
+          );
+
+          if (matchingPermission.isNotEmpty) {
+            final root = await safFiles.getItem(savedProjectUri);
+
+            if (root != null && root.isDir) {
+              projectUri = savedProjectUri;
+              projectName = savedProjectName;
+
+              // استعادة مجلد العمل بصورة مستقلة.
+              await _restoreSelectedDirectory(prefs);
+            } else {
+              await prefs.remove('bisho_project_uri');
+              await prefs.remove('bisho_project_name');
+
+              await _clearSavedDirectoryState();
+            }
+          } else {
+            await prefs.remove('bisho_project_uri');
+            await prefs.remove('bisho_project_name');
+
+            await _clearSavedDirectoryState();
+          }
+        } catch (_) {
+          projectUri = null;
+          projectName = 'لا يوجد مشروع';
+
+          selectedDirectoryUri = null;
+          selectedDirectoryName = '';
+
+          try {
+            await prefs.remove('bisho_project_uri');
+            await prefs.remove('bisho_project_name');
+
+            await _clearSavedDirectoryState();
+          } catch (_) {}
+        }
+      } else {
+        // لا يوجد مشروع محفوظ.
+        await _clearSavedDirectoryState();
+      }
+
+      // استعادة التبويبات بصورة مستقلة عن مجلد العمل.
       if (savedTabs != null) {
         final List<dynamic> data = jsonDecode(savedTabs);
 
         for (final item in data) {
-          final language = item['language'] as String? ?? 'Dart';
+          final language =
+              item['language'] as String? ?? 'Dart';
+
           final safeLanguage =
-              languages.containsKey(language) ? language : 'Dart';
+              languages.containsKey(language)
+                  ? language
+                  : 'Dart';
 
           tabs.add(
             createTab(
-              fileName: item['fileName'] as String? ?? 'untitled.dart',
+              fileName:
+                  item['fileName'] as String? ?? 'untitled.dart',
               language: safeLanguage,
               code: item['code'] as String? ?? '',
-              filePath: item['filePath'] as String?,
+              fileUri: item['fileUri'] as String?,
+              parentUri: item['parentUri'] as String?,
               isSaved: true,
             ),
           );
         }
       } else {
+        // دعم النسخة القديمة من الحفظ.
         final oldCode = prefs.getString('bisho_code');
-        final oldName = prefs.getString('bisho_filename') ?? 'main.dart';
-        final oldLanguage = prefs.getString('bisho_language') ?? 'Dart';
+
+        final oldName =
+            prefs.getString('bisho_filename') ?? 'main.dart';
+
+        final oldLanguage =
+            prefs.getString('bisho_language') ?? 'Dart';
 
         final safeLanguage =
-            languages.containsKey(oldLanguage) ? oldLanguage : 'Dart';
+            languages.containsKey(oldLanguage)
+                ? oldLanguage
+                : 'Dart';
 
         tabs.add(
           createTab(
@@ -234,7 +550,8 @@ class _EditorScreenState extends State<EditorScreen> {
         tabs.add(createTab());
       }
 
-      activeIndex = savedIndex.clamp(0, tabs.length - 1).toInt();
+      activeIndex =
+          savedIndex.clamp(0, tabs.length - 1).toInt();
     } catch (e) {
       for (final tab in tabs) {
         tab.controller.dispose();
@@ -242,69 +559,24 @@ class _EditorScreenState extends State<EditorScreen> {
 
       tabs.clear();
       tabs.add(createTab());
+
       activeIndex = 0;
+
+      projectUri = null;
+      projectName = 'لا يوجد مشروع';
+
+      selectedDirectoryUri = null;
+      selectedDirectoryName = '';
     }
 
     isRestoring = false;
 
     if (mounted) {
       setState(() {
-        status = 'تم استعادة المشروع';
+        status = projectUri != null
+            ? 'تم استعادة المشروع والملفات'
+            : 'تم استعادة الملفات - افتح مجلد المشروع';
       });
-    }
-  }
-
-  Future<void> saveAllTabs() async {
-    try {
-      for (final tab in tabs) {
-        if (tab.filePath != null) {
-          final file = File(tab.filePath!);
-          await file.writeAsString(tab.controller.text);
-        }
-      }
-
-      final prefs = await SharedPreferences.getInstance();
-
-      final data = tabs.map((tab) {
-        return {
-          'fileName': tab.fileName,
-          'language': tab.language,
-          'code': tab.controller.text,
-          'filePath': tab.filePath,
-        };
-      }).toList();
-
-      await prefs.setString('bisho_tabs', jsonEncode(data));
-      await prefs.setInt('bisho_active_index', activeIndex);
-
-      await prefs.setString(
-        'bisho_code',
-        activeTab.controller.text,
-      );
-
-      await prefs.setString(
-        'bisho_filename',
-        activeTab.fileName,
-      );
-
-      await prefs.setString(
-        'bisho_language',
-        activeTab.language,
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        for (final tab in tabs) {
-          tab.isSaved = true;
-        }
-
-        status = 'تم حفظ جميع الملفات';
-      });
-
-      showMessage('تم حفظ الملفات');
-    } catch (e) {
-      showMessage('تعذر حفظ بعض الملفات: $e');
     }
   }
 
@@ -317,7 +589,8 @@ class _EditorScreenState extends State<EditorScreen> {
           'fileName': tab.fileName,
           'language': tab.language,
           'code': tab.controller.text,
-          'filePath': tab.filePath,
+          'fileUri': tab.fileUri,
+          'parentUri': tab.parentUri,
         };
       }).toList();
 
@@ -326,12 +599,98 @@ class _EditorScreenState extends State<EditorScreen> {
     } catch (_) {}
   }
 
+  String _mimeType(String name) {
+    final ext =
+        name.contains('.') ? name.split('.').last.toLowerCase() : '';
+
+    const types = {
+      'dart': 'text/plain',
+      'py': 'text/x-python',
+      'js': 'text/javascript',
+      'ts': 'text/typescript',
+      'html': 'text/html',
+      'htm': 'text/html',
+      'css': 'text/css',
+      'json': 'application/json',
+      'xml': 'application/xml',
+      'java': 'text/x-java-source',
+      'kt': 'text/plain',
+      'php': 'text/plain',
+      'sql': 'text/plain',
+      'sh': 'text/plain',
+      'txt': 'text/plain',
+    };
+
+    return types[ext] ?? 'application/octet-stream';
+  }
+
+  Future<bool> saveTabToSAF(EditorTab tab) async {
+    if (tab.parentUri == null || tab.parentUri!.isEmpty) {
+      return false;
+    }
+
+    final bytes = Uint8List.fromList(
+      utf8.encode(tab.controller.text),
+    );
+
+    final document = await safFiles.saveFile(
+      parentUri: tab.parentUri!,
+      fileName: tab.fileName,
+      mimeType: _mimeType(tab.fileName),
+      bytes: bytes,
+      overwrite: true,
+    );
+
+    tab.fileUri = document.uri;
+    tab.isSaved = true;
+
+    return true;
+  }
+
+  Future<void> saveAllTabs() async {
+    try {
+      int savedCount = 0;
+      int skippedCount = 0;
+
+      for (final tab in tabs) {
+        if (tab.parentUri == null) {
+          skippedCount++;
+          continue;
+        }
+
+        await saveTabToSAF(tab);
+        savedCount++;
+      }
+
+      await saveTabStateSilently();
+
+      if (!mounted) return;
+
+      setState(() {
+        status = 'تم حفظ $savedCount ملف';
+      });
+
+      if (skippedCount > 0) {
+        showMessage(
+          'تم حفظ $savedCount ملف. '
+          '$skippedCount ملف يحتاج إلى تصدير منفصل.',
+        );
+      } else {
+        showMessage('تم حفظ جميع الملفات');
+      }
+    } catch (e) {
+      showMessage('تعذر حفظ بعض الملفات: $e');
+    }
+  }
+
   void createNewTab() {
     setState(() {
       tabs.add(createTab());
       activeIndex = tabs.length - 1;
       status = 'تم إنشاء ملف جديد';
     });
+
+    saveTabStateSilently();
   }
 
   void selectTab(int index) {
@@ -369,7 +728,7 @@ class _EditorScreenState extends State<EditorScreen> {
         ),
       );
 
-      if (result != true) return;
+      if (result != true || !mounted) return;
     }
 
     setState(() {
@@ -419,98 +778,22 @@ class _EditorScreenState extends State<EditorScreen> {
 
   Future<void> openFile() async {
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.any,
-        withData: true,
+      final file = await saf.pickFile(
+        persistablePermission: true,
       );
 
-      if (result == null || result.files.isEmpty) return;
+      if (file == null) return;
 
-      final file = result.files.first;
-      final Uint8List? bytes = file.bytes;
-
-      if (bytes == null) {
-        showMessage('تعذر قراءة الملف');
-        return;
-      }
-
-      final language = detectLanguage(file.extension ?? '');
+      final bytes = await safFiles.readFile(file.uri);
       final content = utf8.decode(bytes, allowMalformed: true);
 
-      setState(() {
-        tabs.add(
-          createTab(
-            fileName: file.name,
-            language: language,
-            code: content,
-            filePath: file.path,
-            isSaved: true,
-          ),
-        );
+      final extension =
+          file.name.contains('.') ? file.name.split('.').last : '';
 
-        activeIndex = tabs.length - 1;
-        status = 'تم فتح الملف';
-      });
-
-      await saveTabStateSilently();
-    } catch (e) {
-      showMessage('حدث خطأ أثناء فتح الملف');
-    }
-  }
-
-  Future<void> openProjectFolder() async {
-    try {
-      final path = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: 'اختر مجلد المشروع',
-      );
-
-      if (path == null) return;
-
-      final directory = Directory(path);
-
-      if (!await directory.exists()) {
-        showMessage('المجلد غير موجود أو لا يمكن الوصول إليه');
-        return;
-      }
-
-      final prefs = await SharedPreferences.getInstance();
-
-      await prefs.setString('bisho_project_path', path);
-      await prefs.setString(
-        'bisho_project_name',
-        directory.uri.pathSegments
-            .where((part) => part.isNotEmpty)
-            .last,
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        projectPath = path;
-        projectName = directory.uri.pathSegments
-            .where((part) => part.isNotEmpty)
-            .last;
-        explorerVisible = true;
-        status = 'تم فتح المشروع';
-      });
-
-      showMessage('تم فتح مجلد المشروع');
-    } catch (e) {
-      showMessage('تعذر فتح المجلد: $e');
-    }
-  }
-
-  Future<void> openProjectFile(File file) async {
-    try {
-      final content = await file.readAsString();
-      final name = file.uri.pathSegments.last;
-
-      final language = detectLanguage(
-        name.contains('.') ? name.split('.').last : '',
-      );
+      final language = detectLanguage(extension);
 
       final existingIndex = tabs.indexWhere(
-        (tab) => tab.filePath == file.path,
+        (tab) => tab.fileUri == file.uri,
       );
 
       if (existingIndex != -1) {
@@ -521,16 +804,141 @@ class _EditorScreenState extends State<EditorScreen> {
       setState(() {
         tabs.add(
           createTab(
-            fileName: name,
+            fileName: file.name,
             language: language,
             code: content,
-            filePath: file.path,
+            fileUri: file.uri,
+            parentUri: null,
             isSaved: true,
           ),
         );
 
         activeIndex = tabs.length - 1;
-        status = 'تم فتح $name';
+        status = 'تم فتح الملف';
+      });
+
+      await saveTabStateSilently();
+    } catch (e) {
+      showMessage('تعذر فتح الملف: $e');
+    }
+  }
+
+  Future<void> openProjectFolder() async {
+    try {
+      final directory = await safFiles.pickProjectFolder();
+
+      if (directory == null) return;
+
+      if (projectUri == directory.uri) {
+        refreshExplorer();
+        showMessage('هذا المشروع مفتوح بالفعل');
+        return;
+      }
+
+      final projectTabs = tabs
+          .where((tab) =>
+              tab.parentUri != null && tab.parentUri!.isNotEmpty)
+          .toList();
+
+      final unsavedCount =
+          projectTabs.where((tab) => !tab.isSaved).length;
+
+      if (projectUri != null && projectTabs.isNotEmpty) {
+        final message = unsavedCount > 0
+            ? 'يوجد $unsavedCount ملف غير محفوظ في المشروع الحالي.\n\n'
+                'ستبقى التبويبات القديمة مفتوحة ومرتبطة بمجلداتها الأصلية. '
+                'لن يتم نقلها إلى المشروع الجديد.'
+            : 'ستبقى تبويبات المشروع الحالي مفتوحة ومرتبطة بمجلداتها الأصلية. '
+                'لن يتم نقلها إلى المشروع الجديد.';
+
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('تغيير المشروع؟'),
+            content: Text(message),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('إلغاء'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('متابعة'),
+              ),
+            ],
+          ),
+        );
+
+        if (confirmed != true || !mounted) return;
+      }
+
+      await saveTabStateSilently();
+
+      final prefs = await SharedPreferences.getInstance();
+
+      await prefs.setString('bisho_project_uri', directory.uri);
+      await prefs.setString('bisho_project_name', directory.name);
+
+      // المشروع الجديد يبدأ دائمًا من جذر المشروع.
+      await prefs.remove(_savedDirectoryUriKey);
+      await prefs.remove(_savedDirectoryNameKey);
+
+      if (!mounted) return;
+
+      setState(() {
+        projectUri = directory.uri;
+        projectName = directory.name;
+
+        selectedDirectoryUri = null;
+        selectedDirectoryName = '';
+
+        explorerVisible = true;
+        _explorerRevision++;
+        status = 'تم فتح المشروع عبر SAF';
+      });
+
+      showMessage('تم فتح مجلد المشروع');
+    } catch (e) {
+      showMessage('تعذر فتح المجلد: $e');
+    }
+  }
+
+  Future<void> openProjectFile(
+    SafDocumentFile file,
+    String parentUri,
+  ) async {
+    try {
+      final bytes = await safFiles.readFile(file.uri);
+      final content = utf8.decode(bytes, allowMalformed: true);
+
+      final extension =
+          file.name.contains('.') ? file.name.split('.').last : '';
+
+      final language = detectLanguage(extension);
+
+      final existingIndex = tabs.indexWhere(
+        (tab) => tab.fileUri == file.uri,
+      );
+
+      if (existingIndex != -1) {
+        selectTab(existingIndex);
+        return;
+      }
+
+      setState(() {
+        tabs.add(
+          createTab(
+            fileName: file.name,
+            language: language,
+            code: content,
+            fileUri: file.uri,
+            parentUri: parentUri,
+            isSaved: true,
+          ),
+        );
+
+        activeIndex = tabs.length - 1;
+        status = 'تم فتح ${file.name}';
       });
 
       await saveTabStateSilently();
@@ -539,61 +947,109 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
+  /// إنشاء ملف داخل مجلد العمل المحدد.
   Future<void> createProjectFile() async {
-    if (projectPath == null) {
+    final targetUri = creationDirectoryUri;
+
+    if (targetUri == null || targetUri.isEmpty) {
       showMessage('افتح مجلد مشروع أولاً');
       return;
     }
 
-    final name = await askName('إنشاء ملف جديد', 'مثال: main.dart');
+    final targetName = creationDirectoryName;
 
-    if (name == null || name.trim().isEmpty) return;
+    final name = await askName(
+      'إنشاء ملف داخل $targetName',
+      'مثال: main.dart',
+    );
+
+    if (name == null || name.trim().isEmpty || !mounted) return;
+
+    final fileName = name.trim();
+
+    if (fileName.contains('/') || fileName.contains('\\')) {
+      showMessage('اكتب اسم ملف فقط');
+      return;
+    }
 
     try {
-      final file = File(
-        '${projectPath!}${Platform.pathSeparator}${name.trim()}',
+      final document = await safFiles.saveFile(
+        parentUri: targetUri,
+        fileName: fileName,
+        mimeType: _mimeType(fileName),
+        bytes: Uint8List(0),
+        overwrite: false,
       );
 
-      if (await file.exists()) {
-        showMessage('هذا الملف موجود بالفعل');
-        return;
-      }
+      final language = detectLanguage(
+        fileName.contains('.') ? fileName.split('.').last : '',
+      );
 
-      await file.create(recursive: true);
+      if (!mounted) return;
 
       setState(() {
-        status = 'تم إنشاء الملف';
+        tabs.add(
+          createTab(
+            fileName: fileName,
+            language: language,
+            code: '',
+            fileUri: document.uri,
+            parentUri: targetUri,
+            isSaved: true,
+          ),
+        );
+
+        activeIndex = tabs.length - 1;
+        _explorerRevision++;
+        status = 'تم إنشاء الملف داخل $targetName';
       });
 
-      await openProjectFile(file);
-      showMessage('تم إنشاء الملف');
+      await saveTabStateSilently();
+      showMessage('تم إنشاء الملف داخل $targetName');
     } catch (e) {
       showMessage('تعذر إنشاء الملف: $e');
     }
   }
 
+  /// إنشاء مجلد داخل مجلد العمل المحدد.
   Future<void> createProjectFolder() async {
-    if (projectPath == null) {
+    final targetUri = creationDirectoryUri;
+
+    if (targetUri == null || targetUri.isEmpty) {
       showMessage('افتح مجلد مشروع أولاً');
       return;
     }
 
-    final name = await askName('إنشاء مجلد جديد', 'اسم المجلد');
+    final targetName = creationDirectoryName;
 
-    if (name == null || name.trim().isEmpty) return;
+    final name = await askName(
+      'إنشاء مجلد داخل $targetName',
+      'اسم المجلد',
+    );
+
+    if (name == null || name.trim().isEmpty || !mounted) return;
+
+    final folderName = name.trim();
+
+    if (folderName.contains('/') || folderName.contains('\\')) {
+      showMessage('اكتب اسم مجلد فقط');
+      return;
+    }
 
     try {
-      final directory = Directory(
-        '${projectPath!}${Platform.pathSeparator}${name.trim()}',
+      await safFiles.createFolder(
+        parentUri: targetUri,
+        folderName: folderName,
       );
 
-      await directory.create(recursive: true);
+      if (!mounted) return;
 
       setState(() {
-        status = 'تم إنشاء المجلد';
+        _explorerRevision++;
+        status = 'تم إنشاء المجلد داخل $targetName';
       });
 
-      showMessage('تم إنشاء المجلد');
+      showMessage('تم إنشاء المجلد داخل $targetName');
     } catch (e) {
       showMessage('تعذر إنشاء المجلد: $e');
     }
@@ -617,11 +1073,8 @@ class _EditorScreenState extends State<EditorScreen> {
             child: const Text('إلغاء'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(
-              context,
-              controller.text,
-            ),
-            child: const Text('إنشاء'),
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('موافق'),
           ),
         ],
       ),
@@ -631,115 +1084,285 @@ class _EditorScreenState extends State<EditorScreen> {
     return result;
   }
 
-  Future<void> renameEntity(FileSystemEntity entity) async {
-    final oldName = entity.uri.pathSegments.last;
+  Future<List<_SafTreeEntry>> collectSubtree(
+    SafDocumentFile root,
+  ) async {
+    final result = <_SafTreeEntry>[];
+    final visited = <String>{};
 
-    final name = await askName('إعادة تسمية', oldName);
+    Future<void> visit(
+      SafDocumentFile item, {
+      required String relativePath,
+      required String? parentUri,
+    }) async {
+      if (!visited.add(item.uri)) return;
 
-    if (name == null || name.trim().isEmpty) return;
+      result.add(
+        _SafTreeEntry(
+          uri: item.uri,
+          name: item.name,
+          relativePath: relativePath,
+          parentUri: parentUri,
+          isDir: item.isDir,
+        ),
+      );
+
+      if (!item.isDir) return;
+
+      final children = await safFiles.listDirectory(item.uri);
+
+      for (final child in children) {
+        final childPath = relativePath.isEmpty
+            ? child.name
+            : '$relativePath/${child.name}';
+
+        await visit(
+          child,
+          relativePath: childPath,
+          parentUri: item.uri,
+        );
+      }
+    }
+
+    await visit(
+      root,
+      relativePath: '',
+      parentUri: null,
+    );
+
+    return result;
+  }
+
+  Future<void> renameEntity(SafDocumentFile entity) async {
+    final name = await askName('إعادة تسمية', entity.name);
+
+    if (name == null || name.trim().isEmpty || !mounted) return;
+
+    final newName = name.trim();
+
+    if (newName.contains('/') || newName.contains('\\')) {
+      showMessage('اكتب اسمًا فقط');
+      return;
+    }
+
+    if (newName == entity.name) return;
 
     try {
-      final parent = entity.parent.path;
-      final newPath = '$parent${Platform.pathSeparator}${name.trim()}';
+      final oldTree = await collectSubtree(entity);
 
-      if (entity is File) {
-        await entity.rename(newPath);
-      } else if (entity is Directory) {
-        await entity.rename(newPath);
-      }
+      final renamed = await safFiles.renameItem(
+        uri: entity.uri,
+        newName: newName,
+      );
 
-      for (final tab in tabs) {
-        if (tab.filePath == entity.path) {
-          tab.filePath = newPath;
-          tab.fileName = name.trim();
-          tab.isSaved = true;
+      if (entity.isDir) {
+        final newTree = await collectSubtree(renamed);
+
+        final oldByUri = <String, _SafTreeEntry>{
+          for (final item in oldTree) item.uri: item,
+        };
+
+        final newByPath = <String, _SafTreeEntry>{
+          for (final item in newTree) item.relativePath: item,
+        };
+
+        // تحديث مجلد العمل إذا كان داخل المجلد الذي تمت تسميته.
+        if (selectedDirectoryUri != null) {
+          final selectedEntry = oldByUri[selectedDirectoryUri];
+
+          if (selectedEntry != null) {
+            final newSelectedEntry =
+                newByPath[selectedEntry.relativePath];
+
+            if (newSelectedEntry != null) {
+              selectedDirectoryUri = newSelectedEntry.uri;
+              selectedDirectoryName = newSelectedEntry.name;
+            }
+          }
+        }
+
+        for (final tab in tabs) {
+          final oldFileEntry = tab.fileUri == null
+              ? null
+              : oldByUri[tab.fileUri];
+
+          if (oldFileEntry != null) {
+            final newFileEntry =
+                newByPath[oldFileEntry.relativePath];
+
+            if (newFileEntry != null) {
+              tab.fileUri = newFileEntry.uri;
+              tab.fileName = newFileEntry.name;
+            }
+          }
+
+          if (tab.parentUri != null) {
+            final oldParentEntry = oldByUri[tab.parentUri];
+
+            if (oldParentEntry != null) {
+              final newParentEntry =
+                  newByPath[oldParentEntry.relativePath];
+
+              if (newParentEntry != null) {
+                tab.parentUri = newParentEntry.uri;
+              }
+            }
+          }
+        }
+      } else {
+        for (final tab in tabs) {
+          if (tab.fileUri == entity.uri) {
+            tab.fileUri = renamed.uri;
+            tab.fileName = renamed.name;
+          }
         }
       }
 
+      if (!mounted) return;
+
       setState(() {
+        _explorerRevision++;
         status = 'تم تغيير الاسم';
       });
 
+      // تحديث مجلد العمل المحفوظ بعد إعادة التسمية.
+      await _saveSelectedDirectoryState();
+
       await saveTabStateSilently();
-      showMessage('تم تغيير الاسم');
+
+      if (!mounted) return;
+
+      showMessage('تم تغيير الاسم وتحديث البيانات المحفوظة');
     } catch (e) {
-      showMessage('تعذرت إعادة التسمية: $e');
+      refreshExplorer();
+      showMessage('تعذرت إعادة التسمية أو تحديث التبويبات: $e');
     }
   }
 
-  Future<void> deleteEntity(FileSystemEntity entity) async {
-    final name = entity.uri.pathSegments.last;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('تأكيد الحذف'),
-        content: Text('هل تريد حذف $name؟'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('إلغاء'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('حذف'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true) return;
-
+  Future<void> deleteEntity(SafDocumentFile entity) async {
     try {
-      await entity.delete(recursive: true);
+      final subtree = await collectSubtree(entity);
 
-      tabs.removeWhere((tab) {
-        final path = tab.filePath;
-        if (path == null) return false;
+      final deletedUris = subtree.map((item) => item.uri).toSet();
 
-        final deletedPath = entity.path;
-        final belongsToDeleted = path == deletedPath ||
-            path.startsWith(
-              '$deletedPath${Platform.pathSeparator}',
-            );
+      final affectedTabs = tabs.where((tab) {
+        final fileIsInside = tab.fileUri != null &&
+            deletedUris.contains(tab.fileUri);
 
-        if (belongsToDeleted) {
-          tab.controller.dispose();
-        }
+        final parentIsInside = tab.parentUri != null &&
+            deletedUris.contains(tab.parentUri);
 
-        return belongsToDeleted;
-      });
+        return fileIsInside || parentIsInside;
+      }).toList();
+
+      final unsavedCount =
+          affectedTabs.where((tab) => !tab.isSaved).length;
+
+      final message = unsavedCount > 0
+          ? 'هل تريد حذف ${entity.name}؟\n\n'
+              'يوجد $unsavedCount ملف مفتوح يحتوي على تعديلات غير محفوظة. '
+              'سيتم إغلاق التبويبات التابعة لهذا العنصر وفقدان تعديلاتها.'
+          : 'هل تريد حذف ${entity.name}؟';
+
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('تأكيد الحذف'),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('إلغاء'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('حذف'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true || !mounted) return;
+
+      final activeId =
+          tabs.isNotEmpty ? activeTab.id : null;
+      final oldActiveIndex = activeIndex;
+
+      await safFiles.deleteItem(entity.uri);
+
+      // هل كان مجلد العمل ضمن العنصر المحذوف؟
+      final selectedDirectoryWasDeleted =
+          selectedDirectoryUri != null &&
+          deletedUris.contains(selectedDirectoryUri);
+
+      if (selectedDirectoryWasDeleted) {
+        selectedDirectoryUri = null;
+        selectedDirectoryName = '';
+
+        await _clearSavedDirectoryState();
+      }
+
+      for (final tab in affectedTabs) {
+        tab.controller.dispose();
+      }
+
+      tabs.removeWhere((tab) => affectedTabs.contains(tab));
 
       if (tabs.isEmpty) {
         tabs.add(createTab());
+        activeIndex = 0;
+      } else {
+        final preservedIndex = activeId == null
+            ? -1
+            : tabs.indexWhere((tab) => tab.id == activeId);
+
+        if (preservedIndex != -1) {
+          activeIndex = preservedIndex;
+        } else {
+          activeIndex = oldActiveIndex
+              .clamp(0, tabs.length - 1)
+              .toInt();
+        }
       }
 
-      activeIndex = activeIndex.clamp(0, tabs.length - 1).toInt();
+      if (!mounted) return;
 
       setState(() {
-        status = 'تم حذف العنصر';
+        _explorerRevision++;
+        status = selectedDirectoryWasDeleted
+            ? 'تم الحذف والعودة إلى جذر المشروع'
+            : 'تم حذف العنصر';
       });
 
       await saveTabStateSilently();
-      showMessage('تم الحذف');
+
+      if (!mounted) return;
+
+      showMessage(
+        selectedDirectoryWasDeleted
+            ? 'تم الحذف والعودة إلى جذر المشروع'
+            : 'تم الحذف وإغلاق التبويبات التابعة',
+      );
     } catch (e) {
-      showMessage('تعذر الحذف: $e');
+      refreshExplorer();
+      showMessage('تعذر حذف العنصر: $e');
     }
   }
 
   Future<void> saveCurrentToDisk() async {
     final tab = activeTab;
 
-    if (tab.filePath == null) {
-      await exportFile();
+    if (tab.parentUri == null) {
+      showMessage('هذا الملف مستقل. استخدم تصدير لحفظ التعديلات.');
       return;
     }
 
     try {
-      await File(tab.filePath!).writeAsString(tab.controller.text);
+      await saveTabToSAF(tab);
+
+      if (!mounted) return;
 
       setState(() {
-        tab.isSaved = true;
         status = 'تم حفظ ${tab.fileName}';
       });
 
@@ -762,7 +1385,7 @@ class _EditorScreenState extends State<EditorScreen> {
         bytes: bytes,
       );
 
-      if (path != null) {
+      if (path != null && mounted) {
         setState(() {
           activeTab.isSaved = true;
           status = 'تم التصدير';
@@ -794,6 +1417,8 @@ class _EditorScreenState extends State<EditorScreen> {
       activeTab.isSaved = false;
       status = 'تم تغيير اللغة';
     });
+
+    saveTabStateSilently();
   }
 
   Future<void> searchCode() async {
@@ -850,6 +1475,50 @@ class _EditorScreenState extends State<EditorScreen> {
     showMessage('تم نسخ الكود');
   }
 
+  void openFlutterPreview() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FlutterPreviewScreen(
+          projectName: projectName,
+        ),
+      ),
+    );
+  }
+
+  // معاينة HTML وربطها بمجلد المشروع المفتوح عبر SAF.
+  Future<void> openHtmlPreview() async {
+    final tab = activeTab;
+
+    final extension = tab.fileName.contains('.')
+        ? tab.fileName.split('.').last.toLowerCase()
+        : '';
+
+    if (extension != 'html' && extension != 'htm') {
+      showMessage(
+        'معاينة الويب متاحة لملفات HTML فقط',
+      );
+      return;
+    }
+
+    if (projectUri == null || projectUri!.isEmpty) {
+      showMessage(
+        'افتح مجلد المشروع أولاً حتى تتمكن المعاينة من قراءة ملفات CSS وJavaScript والصور',
+      );
+      return;
+    }
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => HtmlPreviewScreen(
+          htmlCode: tab.controller.text,
+          projectUri: projectUri,
+        ),
+      ),
+    );
+  }
+
   void showMessage(String message) {
     if (!mounted) return;
 
@@ -861,12 +1530,10 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  Widget buildExplorerNode(
-    Directory directory,
-    int depth,
-  ) {
-    return FutureBuilder<List<FileSystemEntity>>(
-      future: directory.list(followLinks: false).toList(),
+  Widget buildExplorerNode(String directoryUri, int depth) {
+    return FutureBuilder<List<SafDocumentFile>>(
+      key: ValueKey('$_explorerRevision-$directoryUri'),
+      future: safFiles.listDirectory(directoryUri),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Padding(
@@ -882,17 +1549,15 @@ class _EditorScreenState extends State<EditorScreen> {
           );
         }
 
-        final items = snapshot.data ?? [];
+        final items =
+            List<SafDocumentFile>.from(snapshot.data ?? []);
 
         items.sort((a, b) {
-          final aDir = a is Directory;
-          final bDir = b is Directory;
+          if (a.isDir && !b.isDir) return -1;
+          if (!a.isDir && b.isDir) return 1;
 
-          if (aDir && !bDir) return -1;
-          if (!aDir && bDir) return 1;
-
-          return a.path.toLowerCase().compareTo(
-                b.path.toLowerCase(),
+          return a.name.toLowerCase().compareTo(
+                b.name.toLowerCase(),
               );
         });
 
@@ -909,34 +1574,51 @@ class _EditorScreenState extends State<EditorScreen> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: items.map((entity) {
-            final name = entity.uri.pathSegments.last;
+            if (entity.isDir) {
+              final isSelectedDirectory =
+                  selectedDirectoryUri == entity.uri;
 
-            if (entity is Directory) {
               return Padding(
                 padding: EdgeInsets.only(right: depth * 5.0),
                 child: ExpansionTile(
-                  key: PageStorageKey(entity.path),
+                  key: PageStorageKey<String>(entity.uri),
                   dense: true,
                   tilePadding: const EdgeInsets.symmetric(
                     horizontal: 8,
                   ),
-                  leading: const Icon(
-                    Icons.folder,
-                    color: Color(0xFFFBBF24),
+                  leading: Icon(
+                    isSelectedDirectory
+                        ? Icons.folder_special
+                        : Icons.folder,
+                    color: isSelectedDirectory
+                        ? const Color(0xFF38BDF8)
+                        : const Color(0xFFFBBF24),
                     size: 20,
                   ),
                   title: Text(
-                    name,
+                    entity.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 12),
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: isSelectedDirectory
+                          ? const Color(0xFF38BDF8)
+                          : null,
+                      fontWeight: isSelectedDirectory
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                    ),
                   ),
                   trailing: PopupMenuButton<String>(
-                    icon: const Icon(
-                      Icons.more_vert,
-                      size: 18,
-                    ),
+                    icon: const Icon(Icons.more_vert, size: 18),
                     onSelected: (value) {
+                      if (value == 'select') {
+                        selectCreationDirectory(
+                          entity.uri,
+                          entity.name,
+                        );
+                      }
+
                       if (value == 'rename') {
                         renameEntity(entity);
                       }
@@ -945,75 +1627,82 @@ class _EditorScreenState extends State<EditorScreen> {
                         deleteEntity(entity);
                       }
                     },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(
+                    itemBuilder: (context) => [
+                      const PopupMenuItem(
+                        value: 'select',
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.drive_file_move,
+                              size: 18,
+                            ),
+                            SizedBox(width: 8),
+                            Text('تعيين كمجلد عمل'),
+                          ],
+                        ),
+                      ),
+                      const PopupMenuDivider(),
+                      const PopupMenuItem(
                         value: 'rename',
                         child: Text('إعادة تسمية'),
                       ),
-                      PopupMenuItem(
+                      const PopupMenuItem(
                         value: 'delete',
                         child: Text('حذف'),
                       ),
                     ],
                   ),
                   children: [
-                    buildExplorerNode(entity, depth + 1),
+                    buildExplorerNode(entity.uri, depth + 1),
                   ],
                 ),
               );
             }
 
-            if (entity is File) {
-              return Padding(
-                padding: EdgeInsets.only(right: depth * 5.0),
-                child: ListTile(
-                  dense: true,
-                  visualDensity: VisualDensity.compact,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                  ),
-                  leading: const Icon(
-                    Icons.insert_drive_file,
-                    color: Color(0xFF38BDF8),
-                    size: 19,
-                  ),
-                  title: Text(
-                    name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                  onTap: () => openProjectFile(entity),
-                  trailing: PopupMenuButton<String>(
-                    icon: const Icon(
-                      Icons.more_vert,
-                      size: 18,
-                    ),
-                    onSelected: (value) {
-                      if (value == 'rename') {
-                        renameEntity(entity);
-                      }
-
-                      if (value == 'delete') {
-                        deleteEntity(entity);
-                      }
-                    },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(
-                        value: 'rename',
-                        child: Text('إعادة تسمية'),
-                      ),
-                      PopupMenuItem(
-                        value: 'delete',
-                        child: Text('حذف'),
-                      ),
-                    ],
-                  ),
+            return Padding(
+              padding: EdgeInsets.only(right: depth * 5.0),
+              child: ListTile(
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
                 ),
-              );
-            }
+                leading: const Icon(
+                  Icons.insert_drive_file,
+                  color: Color(0xFF38BDF8),
+                  size: 19,
+                ),
+                title: Text(
+                  entity.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12),
+                ),
+                onTap: () => openProjectFile(entity, directoryUri),
+                trailing: PopupMenuButton<String>(
+                  icon: const Icon(Icons.more_vert, size: 18),
+                  onSelected: (value) {
+                    if (value == 'rename') {
+                      renameEntity(entity);
+                    }
 
-            return const SizedBox.shrink();
+                    if (value == 'delete') {
+                      deleteEntity(entity);
+                    }
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(
+                      value: 'rename',
+                      child: Text('إعادة تسمية'),
+                    ),
+                    PopupMenuItem(
+                      value: 'delete',
+                      child: Text('حذف'),
+                    ),
+                  ],
+                ),
+              ),
+            );
           }).toList(),
         );
       },
@@ -1022,7 +1711,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   Widget buildExplorer() {
     return Container(
-      width: 190,
+      width: 115,
       color: const Color(0xFF111827),
       child: Column(
         children: [
@@ -1050,11 +1739,16 @@ class _EditorScreenState extends State<EditorScreen> {
                   icon: const Icon(Icons.create_new_folder, size: 19),
                   tooltip: 'مجلد جديد',
                 ),
+                IconButton(
+                  onPressed: refreshExplorer,
+                  icon: const Icon(Icons.refresh, size: 19),
+                  tooltip: 'تحديث المستكشف',
+                ),
               ],
             ),
           ),
           const Divider(height: 1),
-          if (projectPath == null)
+          if (projectUri == null)
             Expanded(
               child: Center(
                 child: Padding(
@@ -1107,12 +1801,68 @@ class _EditorScreenState extends State<EditorScreen> {
                       icon: const Icon(Icons.folder_open, size: 18),
                     ),
                   ),
+
+                  // عرض مجلد العمل الحالي.
+                  Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 3,
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 7,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1E293B),
+                      borderRadius: BorderRadius.circular(7),
+                      border: Border.all(
+                        color: selectedDirectoryUri != null
+                            ? const Color(0xFF38BDF8)
+                            : const Color(0xFF334155),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          selectedDirectoryUri != null
+                              ? Icons.folder_special
+                              : Icons.home_work,
+                          size: 15,
+                          color: const Color(0xFF38BDF8),
+                        ),
+                        const SizedBox(width: 5),
+                        Expanded(
+                          child: Text(
+                            'العمل: $creationDirectoryName',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 10),
+                          ),
+                        ),
+                        if (selectedDirectoryUri != null)
+                          IconButton(
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(
+                              minWidth: 26,
+                              minHeight: 26,
+                            ),
+                            padding: EdgeInsets.zero,
+                            tooltip: 'العودة إلى جذر المشروع',
+                            onPressed: resetCreationDirectory,
+                            icon: const Icon(
+                              Icons.home,
+                              size: 17,
+                              color: Colors.white70,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+
                   Expanded(
                     child: SingleChildScrollView(
-                      child: buildExplorerNode(
-                        Directory(projectPath!),
-                        0,
-                      ),
+                      child: buildExplorerNode(projectUri!, 0),
                     ),
                   ),
                 ],
@@ -1144,9 +1894,7 @@ class _EditorScreenState extends State<EditorScreen> {
                       minWidth: 100,
                       maxWidth: 180,
                     ),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 9,
-                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 9),
                     decoration: BoxDecoration(
                       color: selected
                           ? const Color(0xFF0B1020)
@@ -1255,6 +2003,14 @@ class _EditorScreenState extends State<EditorScreen> {
           ),
           actions: [
             IconButton(
+              onPressed: openFlutterPreview,
+              icon: const Icon(
+                Icons.phone_android,
+                color: Color(0xFF38BDF8),
+              ),
+              tooltip: 'معاينة Flutter',
+            ),
+            IconButton(
               onPressed: () {
                 setState(() {
                   explorerVisible = !explorerVisible;
@@ -1355,6 +2111,16 @@ class _EditorScreenState extends State<EditorScreen> {
                   toolButton(Icons.download, 'تصدير', exportFile),
                   toolButton(Icons.search, 'بحث', searchCode),
                   toolButton(Icons.copy, 'نسخ', copyCode),
+                  toolButton(
+                    Icons.phone_android,
+                    'معاينة Flutter',
+                    openFlutterPreview,
+                  ),
+                  toolButton(
+                    Icons.language,
+                    'معاينة HTML',
+                    openHtmlPreview,
+                  ),
                 ],
               ),
             ),
