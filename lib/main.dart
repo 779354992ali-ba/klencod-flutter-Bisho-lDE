@@ -15,7 +15,6 @@ import 'package:highlight/languages/typescript.dart' as ts_lang;
 import 'package:highlight/languages/java.dart' as java_lang;
 import 'package:highlight/languages/kotlin.dart' as kotlin_lang;
 import 'package:highlight/languages/swift.dart' as swift_lang;
-import 'package:highlight/languages/c.dart' as c_lang;
 import 'package:highlight/languages/cpp.dart' as cpp_lang;
 import 'package:highlight/languages/css.dart' as css_lang;
 import 'package:highlight/languages/xml.dart' as xml_lang;
@@ -91,7 +90,7 @@ class _EditorScreenState extends State<EditorScreen> {
     'Java': java_lang.java,
     'Kotlin': kotlin_lang.kotlin,
     'Swift': swift_lang.swift,
-    'C': c_lang.c,
+    'C': cpp_lang.cpp,
     'C++': cpp_lang.cpp,
     'CSS': css_lang.css,
     'HTML': xml_lang.xml,
@@ -192,8 +191,8 @@ class _EditorScreenState extends State<EditorScreen> {
       final savedIndex = prefs.getInt('bisho_active_index') ?? 0;
 
       projectPath = prefs.getString('bisho_project_path');
-      projectName = prefs.getString('bisho_project_name') ??
-          'لا يوجد مشروع';
+      projectName =
+          prefs.getString('bisho_project_name') ?? 'لا يوجد مشروع';
 
       if (savedTabs != null) {
         final List<dynamic> data = jsonDecode(savedTabs);
@@ -205,8 +204,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
           tabs.add(
             createTab(
-              fileName:
-                  item['fileName'] as String? ?? 'untitled.dart',
+              fileName: item['fileName'] as String? ?? 'untitled.dart',
               language: safeLanguage,
               code: item['code'] as String? ?? '',
               filePath: item['filePath'] as String?,
@@ -216,10 +214,8 @@ class _EditorScreenState extends State<EditorScreen> {
         }
       } else {
         final oldCode = prefs.getString('bisho_code');
-        final oldName =
-            prefs.getString('bisho_filename') ?? 'main.dart';
-        final oldLanguage =
-            prefs.getString('bisho_language') ?? 'Dart';
+        final oldName = prefs.getString('bisho_filename') ?? 'main.dart';
+        final oldLanguage = prefs.getString('bisho_language') ?? 'Dart';
 
         final safeLanguage =
             languages.containsKey(oldLanguage) ? oldLanguage : 'Dart';
@@ -243,6 +239,7 @@ class _EditorScreenState extends State<EditorScreen> {
       for (final tab in tabs) {
         tab.controller.dispose();
       }
+
       tabs.clear();
       tabs.add(createTab());
       activeIndex = 0;
@@ -284,10 +281,12 @@ class _EditorScreenState extends State<EditorScreen> {
         'bisho_code',
         activeTab.controller.text,
       );
+
       await prefs.setString(
         'bisho_filename',
         activeTab.fileName,
       );
+
       await prefs.setString(
         'bisho_language',
         activeTab.language,
@@ -299,6 +298,7 @@ class _EditorScreenState extends State<EditorScreen> {
         for (final tab in tabs) {
           tab.isSaved = true;
         }
+
         status = 'تم حفظ جميع الملفات';
       });
 
@@ -447,6 +447,7 @@ class _EditorScreenState extends State<EditorScreen> {
             isSaved: true,
           ),
         );
+
         activeIndex = tabs.length - 1;
         status = 'تم فتح الملف';
       });
@@ -503,6 +504,7 @@ class _EditorScreenState extends State<EditorScreen> {
     try {
       final content = await file.readAsString();
       final name = file.uri.pathSegments.last;
+
       final language = detectLanguage(
         name.contains('.') ? name.split('.').last : '',
       );
@@ -844,6 +846,7 @@ class _EditorScreenState extends State<EditorScreen> {
     await Clipboard.setData(
       ClipboardData(text: activeTab.controller.text),
     );
+
     showMessage('تم نسخ الكود');
   }
 
@@ -937,6 +940,7 @@ class _EditorScreenState extends State<EditorScreen> {
                       if (value == 'rename') {
                         renameEntity(entity);
                       }
+
                       if (value == 'delete') {
                         deleteEntity(entity);
                       }
@@ -989,6 +993,7 @@ class _EditorScreenState extends State<EditorScreen> {
                       if (value == 'rename') {
                         renameEntity(entity);
                       }
+
                       if (value == 'delete') {
                         deleteEntity(entity);
                       }
@@ -1214,6 +1219,7 @@ class _EditorScreenState extends State<EditorScreen> {
     for (final tab in tabs) {
       tab.controller.dispose();
     }
+
     super.dispose();
   }
 
