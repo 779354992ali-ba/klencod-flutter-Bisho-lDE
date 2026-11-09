@@ -1,6 +1,5 @@
 
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -21,8 +20,7 @@ class HtmlPreviewScreen extends StatefulWidget {
       _HtmlPreviewScreenState();
 }
 
-class _HtmlPreviewScreenState
-    extends State<HtmlPreviewScreen> {
+class _HtmlPreviewScreenState extends State<HtmlPreviewScreen> {
   late final WebViewController _controller;
 
   final Saf _saf = Saf();
@@ -43,6 +41,7 @@ class _HtmlPreviewScreenState
         NavigationDelegate(
           onPageStarted: (_) {
             if (!mounted) return;
+
             setState(() {
               _isLoading = true;
               _error = null;
@@ -50,12 +49,14 @@ class _HtmlPreviewScreenState
           },
           onPageFinished: (_) {
             if (!mounted) return;
+
             setState(() {
               _isLoading = false;
             });
           },
           onWebResourceError: (error) {
             if (!mounted) return;
+
             setState(() {
               _isLoading = false;
               _error = error.description;
@@ -107,7 +108,10 @@ class _HtmlPreviewScreenState
           : '$prefix/${item.name}';
 
       if (item.isDir) {
-        await _readDirectory(item.uri, relativePath);
+        await _readDirectory(
+          item.uri,
+          relativePath,
+        );
       } else {
         try {
           final bytes = await _saf.readFileBytes(item.uri);
@@ -115,10 +119,9 @@ class _HtmlPreviewScreenState
           final mime = _mimeType(item.name);
           final data = base64Encode(bytes);
 
-          _files[relativePath] =
-              'data:$mime;base64,$data';
+          _files[relativePath] = 'data:$mime;base64,$data';
         } catch (_) {
-          // تجاهل الملف الذي تعذرت قراءته.
+          // تجاهل الملفات التي تعذرت قراءتها.
         }
       }
     }
@@ -160,7 +163,8 @@ class _HtmlPreviewScreenState
       return null;
     }
 
-    final withoutQuery = cleanPath.split('?').first.split('#').first;
+    final withoutQuery =
+        cleanPath.split('?').first.split('#').first;
 
     final combined = withoutQuery.startsWith('/')
         ? withoutQuery.substring(1)
@@ -177,17 +181,20 @@ class _HtmlPreviewScreenState
   }) {
     return css.replaceAllMapped(
       RegExp(
-        r'url\(\s*([\'"]?)(.*?)\1\s*\)',
+        r'''url\(\s*(['"]?)(.*?)\1\s*\)''',
         caseSensitive: false,
       ),
       (match) {
         final path = match.group(2) ?? '';
+
         final data = _resolveFile(
           path,
           baseDirectory: baseDirectory,
         );
 
-        if (data == null) return match.group(0)!;
+        if (data == null) {
+          return match.group(0)!;
+        }
 
         return 'url("$data")';
       },
@@ -197,9 +204,10 @@ class _HtmlPreviewScreenState
   String _prepareHtml() {
     var html = widget.htmlCode;
 
+    // معالجة ملفات JavaScript والصور والوسائط و iframe.
     html = html.replaceAllMapped(
       RegExp(
-        r'''<(script|img|source|video|audio|iframe)[^>]+(?:src)\s*=\s*(['"])(.*?)\2[^>]*>''',
+        r'''<(script|img|source|video|audio|iframe)\b[^>]+src\s*=\s*(['"])(.*?)\2[^>]*>''',
         caseSensitive: false,
         dotAll: true,
       ),
@@ -221,6 +229,7 @@ class _HtmlPreviewScreenState
       },
     );
 
+    // معالجة ملفات CSS الخارجية.
     html = html.replaceAllMapped(
       RegExp(
         r'''<link\b[^>]*href\s*=\s*(['"])(.*?)\1[^>]*>''',
@@ -245,6 +254,7 @@ class _HtmlPreviewScreenState
       },
     );
 
+    // معالجة CSS الموجود داخل style.
     html = html.replaceAllMapped(
       RegExp(
         r'<style[^>]*>(.*?)</style>',
@@ -252,7 +262,9 @@ class _HtmlPreviewScreenState
         dotAll: true,
       ),
       (match) {
-        final css = _rewriteCss(match.group(1) ?? '');
+        final css = _rewriteCss(
+          match.group(1) ?? '',
+        );
 
         return '<style>$css</style>';
       },
@@ -272,6 +284,8 @@ class _HtmlPreviewScreenState
           '',
         );
       }
+
+      if (!mounted) return;
 
       final html = _prepareHtml();
 
