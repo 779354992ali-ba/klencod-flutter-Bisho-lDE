@@ -29,6 +29,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:saf/saf.dart';
 
 import 'core/services/saf_file_service.dart';
+import 'features/projects/new_project_wizard.dart';
 import 'flutter_preview_screen.dart';
 import 'html_preview_screen.dart';
 
@@ -169,8 +170,6 @@ class _EditorScreenState extends State<EditorScreen> {
   String? projectUri;
   String projectName = 'لا يوجد مشروع';
 
-  // مجلد العمل المحدد لإنشاء الملفات والمجلدات.
-  // إذا كانت قيمته null فسيكون جذر المشروع هو الوجهة.
   String? selectedDirectoryUri;
   String selectedDirectoryName = '';
 
@@ -179,12 +178,10 @@ class _EditorScreenState extends State<EditorScreen> {
 
   EditorTab get activeTab => tabs[activeIndex];
 
-  // وجهة الإنشاء الحالية.
   String? get creationDirectoryUri {
     return selectedDirectoryUri ?? projectUri;
   }
 
-  // اسم وجهة الإنشاء الحالية.
   String get creationDirectoryName {
     if (selectedDirectoryUri == null) {
       return projectName;
@@ -239,7 +236,6 @@ class _EditorScreenState extends State<EditorScreen> {
     return tab;
   }
 
-  /// حفظ بيانات مجلد العمل المحدد.
   Future<void> _saveSelectedDirectoryState() async {
     final prefs = await SharedPreferences.getInstance();
 
@@ -261,7 +257,6 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  /// مسح بيانات مجلد العمل المحفوظة.
   Future<void> _clearSavedDirectoryState() async {
     final prefs = await SharedPreferences.getInstance();
 
@@ -269,7 +264,6 @@ class _EditorScreenState extends State<EditorScreen> {
     await prefs.remove(_savedDirectoryNameKey);
   }
 
-  /// تحديد مجلد العمل وحفظه لاستعادته لاحقًا.
   Future<void> selectCreationDirectory(
     String directoryUri,
     String directoryName,
@@ -284,7 +278,6 @@ class _EditorScreenState extends State<EditorScreen> {
         return;
       }
 
-      // التأكد من أن المجلد داخل المشروع المفتوح.
       final root = await safFiles.getItem(projectUri!);
 
       if (root == null || !root.isDir) {
@@ -327,7 +320,6 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  /// العودة إلى جذر المشروع ومسح الاختيار المحفوظ.
   Future<void> resetCreationDirectory() async {
     if (projectUri == null) return;
 
@@ -350,7 +342,6 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  /// تحديث المستكشف مع الاحتفاظ بحالة المجلدات.
   void refreshExplorer() {
     if (!mounted) return;
 
@@ -360,7 +351,6 @@ class _EditorScreenState extends State<EditorScreen> {
     });
   }
 
-  /// استعادة مجلد العمل بصورة مستقلة عن التبويبات.
   Future<void> _restoreSelectedDirectory(
     SharedPreferences prefs,
   ) async {
@@ -379,7 +369,6 @@ class _EditorScreenState extends State<EditorScreen> {
         return;
       }
 
-      // التأكد من صلاحية مجلد المشروع.
       final root = await safFiles.getItem(projectUri!);
 
       if (root == null || !root.isDir) {
@@ -387,7 +376,6 @@ class _EditorScreenState extends State<EditorScreen> {
         return;
       }
 
-      // التأكد أن مجلد العمل ما زال داخل المشروع.
       final tree = await collectSubtree(root);
 
       _SafTreeEntry? matchingDirectory;
@@ -407,10 +395,8 @@ class _EditorScreenState extends State<EditorScreen> {
       selectedDirectoryUri = matchingDirectory.uri;
       selectedDirectoryName = matchingDirectory.name;
 
-      // تحديث الاسم المحفوظ إذا تغير اسم المجلد.
       await _saveSelectedDirectoryState();
     } catch (_) {
-      // فشل الاستعادة لا يمنع استعادة التبويبات.
       selectedDirectoryUri = null;
       selectedDirectoryName = '';
 
@@ -442,7 +428,6 @@ class _EditorScreenState extends State<EditorScreen> {
       selectedDirectoryUri = null;
       selectedDirectoryName = '';
 
-      // استعادة المشروع والتحقق من صلاحيات SAF.
       if (savedProjectUri != null &&
           savedProjectUri.isNotEmpty) {
         try {
@@ -463,7 +448,6 @@ class _EditorScreenState extends State<EditorScreen> {
               projectUri = savedProjectUri;
               projectName = savedProjectName;
 
-              // استعادة مجلد العمل بصورة مستقلة.
               await _restoreSelectedDirectory(prefs);
             } else {
               await prefs.remove('bisho_project_uri');
@@ -492,11 +476,9 @@ class _EditorScreenState extends State<EditorScreen> {
           } catch (_) {}
         }
       } else {
-        // لا يوجد مشروع محفوظ.
         await _clearSavedDirectoryState();
       }
 
-      // استعادة التبويبات بصورة مستقلة عن مجلد العمل.
       if (savedTabs != null) {
         final List<dynamic> data = jsonDecode(savedTabs);
 
@@ -522,7 +504,6 @@ class _EditorScreenState extends State<EditorScreen> {
           );
         }
       } else {
-        // دعم النسخة القديمة من الحفظ.
         final oldCode = prefs.getString('bisho_code');
 
         final oldName =
@@ -879,7 +860,6 @@ class _EditorScreenState extends State<EditorScreen> {
       await prefs.setString('bisho_project_uri', directory.uri);
       await prefs.setString('bisho_project_name', directory.name);
 
-      // المشروع الجديد يبدأ دائمًا من جذر المشروع.
       await prefs.remove(_savedDirectoryUriKey);
       await prefs.remove(_savedDirectoryNameKey);
 
@@ -900,6 +880,179 @@ class _EditorScreenState extends State<EditorScreen> {
       showMessage('تم فتح مجلد المشروع');
     } catch (e) {
       showMessage('تعذر فتح المجلد: $e');
+    }
+  }
+
+  /// إنشاء مشروع جديد باستخدام معالج المشاريع وSAF.
+  Future<void> createNewProject() async {
+    bool firstDirectory = true;
+
+    try {
+      await NewProjectWizard.show(
+        context,
+        pickLocation: () async {
+          final folder = await safFiles.pickProjectFolder();
+
+          if (folder == null) return null;
+
+          return ProjectSaveLocation(
+            uri: folder.uri,
+            name: folder.name,
+          );
+        },
+        createDirectory: (parentUri, directoryName) async {
+          final existing = await safFiles.findChild(
+            parentUri: parentUri,
+            name: directoryName,
+          );
+
+          if (firstDirectory) {
+            firstDirectory = false;
+
+            if (existing != null) {
+              throw Exception(
+                'يوجد عنصر بالاسم "$directoryName" '
+                'في مجلد الحفظ. اختر اسمًا آخر أو مجلدًا مختلفًا.',
+              );
+            }
+          } else {
+            if (existing != null) {
+              if (existing.isDir) {
+                return existing.uri;
+              }
+
+              throw Exception(
+                'يوجد ملف بالاسم "$directoryName" '
+                'ولا يمكن استخدامه كمجلد.',
+              );
+            }
+          }
+
+          final folder = await safFiles.createFolder(
+            parentUri: parentUri,
+            folderName: directoryName,
+          );
+
+          return folder.uri;
+        },
+        writeFile: (
+          parentUri,
+          fileName,
+          mimeType,
+          bytes,
+        ) async {
+          await safFiles.saveFile(
+            parentUri: parentUri,
+            fileName: fileName,
+            mimeType: mimeType,
+            bytes: Uint8List.fromList(bytes),
+            overwrite: false,
+          );
+        },
+        onCreated: (project) async {
+          final prefs = await SharedPreferences.getInstance();
+
+          await prefs.setString(
+            'bisho_project_uri',
+            project.rootUri,
+          );
+
+          await prefs.setString(
+            'bisho_project_name',
+            project.name,
+          );
+
+          await prefs.remove(_savedDirectoryUriKey);
+          await prefs.remove(_savedDirectoryNameKey);
+
+          if (!mounted) return;
+
+          setState(() {
+            projectUri = project.rootUri;
+            projectName = project.name;
+
+            selectedDirectoryUri = null;
+            selectedDirectoryName = '';
+
+            explorerVisible = true;
+            _explorerRevision++;
+
+            status = 'تم إنشاء المشروع ${project.name}';
+          });
+
+          // البحث عن ملف البداية داخل المشروع.
+          try {
+            final segments = project.entryFile
+                .split('/')
+                .where((segment) => segment.isNotEmpty)
+                .toList();
+
+            var currentUri = project.rootUri;
+            SafDocumentFile? entryFile;
+            var entryParentUri = currentUri;
+
+            for (var i = 0; i < segments.length; i++) {
+              final found = await safFiles.findChild(
+                parentUri: currentUri,
+                name: segments[i],
+              );
+
+              if (found == null) {
+                break;
+              }
+
+              if (i == segments.length - 1) {
+                if (!found.isDir) {
+                  entryFile = found;
+                  entryParentUri = currentUri;
+                }
+              } else {
+                if (!found.isDir) {
+                  break;
+                }
+
+                currentUri = found.uri;
+              }
+            }
+
+            if (!mounted) return;
+
+            if (entryFile != null) {
+              await openProjectFile(
+                entryFile,
+                entryParentUri,
+              );
+            } else {
+              showMessage(
+                'تم إنشاء المشروع، لكن تعذر العثور على ملف البداية.',
+              );
+            }
+          } catch (e) {
+            showMessage(
+              'تم إنشاء المشروع، لكن تعذر فتح ملف البداية: $e',
+            );
+          }
+
+          await saveTabStateSilently();
+
+          if (!mounted) return;
+
+          if (project.isFlutterSourceOnly) {
+            showMessage(
+              'تم إنشاء ملفات مصدر Flutter. '
+              'يلزم Flutter SDK لإنشاء ملفات البناء الأصلية.',
+            );
+          } else {
+            showMessage(
+              'تم إنشاء المشروع وفتح ملف البداية بنجاح',
+            );
+          }
+        },
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      showMessage('تعذر إنشاء المشروع: $e');
     }
   }
 
@@ -947,7 +1100,6 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  /// إنشاء ملف داخل مجلد العمل المحدد.
   Future<void> createProjectFile() async {
     final targetUri = creationDirectoryUri;
 
@@ -1011,7 +1163,6 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  /// إنشاء مجلد داخل مجلد العمل المحدد.
   Future<void> createProjectFolder() async {
     final targetUri = creationDirectoryUri;
 
@@ -1166,7 +1317,6 @@ class _EditorScreenState extends State<EditorScreen> {
           for (final item in newTree) item.relativePath: item,
         };
 
-        // تحديث مجلد العمل إذا كان داخل المجلد الذي تمت تسميته.
         if (selectedDirectoryUri != null) {
           final selectedEntry = oldByUri[selectedDirectoryUri];
 
@@ -1225,9 +1375,7 @@ class _EditorScreenState extends State<EditorScreen> {
         status = 'تم تغيير الاسم';
       });
 
-      // تحديث مجلد العمل المحفوظ بعد إعادة التسمية.
       await _saveSelectedDirectoryState();
-
       await saveTabStateSilently();
 
       if (!mounted) return;
@@ -1290,7 +1438,6 @@ class _EditorScreenState extends State<EditorScreen> {
 
       await safFiles.deleteItem(entity.uri);
 
-      // هل كان مجلد العمل ضمن العنصر المحذوف؟
       final selectedDirectoryWasDeleted =
           selectedDirectoryUri != null &&
           deletedUris.contains(selectedDirectoryUri);
@@ -1486,7 +1633,6 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  // معاينة HTML وربطها بمجلد المشروع المفتوح عبر SAF.
   Future<void> openHtmlPreview() async {
     final tab = activeTab;
 
@@ -1801,8 +1947,6 @@ class _EditorScreenState extends State<EditorScreen> {
                       icon: const Icon(Icons.folder_open, size: 18),
                     ),
                   ),
-
-                  // عرض مجلد العمل الحالي.
                   Container(
                     width: double.infinity,
                     margin: const EdgeInsets.symmetric(
@@ -1859,7 +2003,6 @@ class _EditorScreenState extends State<EditorScreen> {
                       ],
                     ),
                   ),
-
                   Expanded(
                     child: SingleChildScrollView(
                       child: buildExplorerNode(projectUri!, 0),
@@ -2027,6 +2170,7 @@ class _EditorScreenState extends State<EditorScreen> {
             PopupMenuButton<String>(
               onSelected: (value) {
                 if (value == 'new') createNewTab();
+                if (value == 'new_project') createNewProject();
                 if (value == 'open') openFile();
                 if (value == 'folder') openProjectFolder();
                 if (value == 'export') exportFile();
@@ -2038,6 +2182,20 @@ class _EditorScreenState extends State<EditorScreen> {
                 PopupMenuItem(
                   value: 'new',
                   child: Text('ملف جديد'),
+                ),
+                PopupMenuItem(
+                  value: 'new_project',
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.create_new_folder,
+                        size: 18,
+                        color: Color(0xFF38BDF8),
+                      ),
+                      SizedBox(width: 8),
+                      Text('إنشاء مشروع جديد'),
+                    ],
+                  ),
                 ),
                 PopupMenuItem(
                   value: 'open',
@@ -2107,6 +2265,11 @@ class _EditorScreenState extends State<EditorScreen> {
                   toolButton(Icons.add, 'جديد', createNewTab),
                   toolButton(Icons.folder_open, 'فتح', openFile),
                   toolButton(Icons.folder, 'مشروع', openProjectFolder),
+                  toolButton(
+                    Icons.create_new_folder,
+                    'مشروع جديد',
+                    createNewProject,
+                  ),
                   toolButton(Icons.save, 'حفظ', saveCurrentToDisk),
                   toolButton(Icons.download, 'تصدير', exportFile),
                   toolButton(Icons.search, 'بحث', searchCode),
